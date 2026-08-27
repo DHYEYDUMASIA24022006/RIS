@@ -1,0 +1,91 @@
+# Fast evaluation config - MNIST, reduced rounds for CPU execution
+# Use this to generate results quickly; switch back to config.yaml for full GPU runs
+
+system:
+  seed: 42
+  device: 'cpu'
+  results_dir: 'results'
+
+channel:
+  model: 'rician'
+  num_antennas_bs: 4
+  num_ris_elements: 64
+  rician_k_factor: 10.0
+  carrier_freq_ghz: 3.5
+  bandwidth_mhz: 10.0
+  noise_power_dbm: -174
+  path_loss_exponent_direct: 3.5
+  path_loss_exponent_br: 2.2
+  path_loss_exponent_ru: 2.5
+  d_bs_ris: 20.0
+  d_ris_user_min: 5.0
+  d_ris_user_max: 50.0
+  d_bs_user_min: 30.0
+  d_bs_user_max: 150.0
+  direct_blockage_prob: 0.80
+  direct_blockage_attenuation_db: 35.0
+  snr_range_db: [-10, 0, 5, 10, 15, 20, 25, 30]
+
+ris:
+  optimizer: 'ao'
+  max_iterations: 50
+  convergence_threshold: 1e-6
+  phase_quantization_bits: null
+
+fl:
+  num_clients: 10
+  num_rounds: 50
+  local_epochs: 2
+  batch_size: 64
+  learning_rate: 0.01
+  lr_decay: 0.995
+  momentum: 0.9
+  weight_decay: 1e-4
+  fraction_fit: 0.5
+  target_accuracy: 0.95
+  aggregation: 'fedavg'
+  snr_outage_threshold_db: 8.0
+  use_rate_outage: false
+  update_noise_scale: 0.08
+  enforce_energy_latency: false
+
+data:
+  dataset: 'mnist'
+  partition: 'noniid'
+  dirichlet_alpha: [0.1, 0.5, 1.0, 100.0]
+  exp1_dirichlet_alpha: 0.5
+  max_samples_per_client: null
+  num_classes: 10
+
+selection:
+  strategy: 'joint'
+  latency_budget_ms: 100.0
+  energy_budget_mj: 50.0
+  tx_power_dbm: 23.0
+  computation_capacity_ghz: 1.0
+  cycles_per_sample: 20.0
+  computation_energy_per_sample_mj: 0.001
+  max_participants: null
+
+aircomp:
+  enabled: false
+  power_control: 'channel_inversion'
+  max_tx_power_dbm: 23.0
+  alignment_method: 'ris_assisted'
+  normalise_updates: true
+
+experiments:
+  exp1_rounds: 50
+  exp2_latency_sweep: [50, 75, 100, 150, 200]
+  exp2_energy_sweep: [20, 30, 50, 75, 100]
+  exp3_ris_elements_sweep: [16, 32, 64, 128]
+  exp3_snr_sweep: [-5, 0, 5, 10, 15, 20]
+  exp3_fl_rounds: 20
+
+plot:
+  dpi: 300
+  font_size: 14
+  fig_width: 8
+  fig_height: 6
+  style: 'seaborn-v0_8-whitegrid'
+  format: 'pdf'

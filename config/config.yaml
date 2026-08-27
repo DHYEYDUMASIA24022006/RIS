@@ -1,0 +1,102 @@
+# System
+system:
+  seed: 42
+  device: 'auto'  # auto, cpu, cuda
+  results_dir: 'results'
+
+# Wireless Channel
+channel:
+  model: 'rician'  # rician, rayleigh
+  num_antennas_bs: 4  # M - BS antennas
+  num_ris_elements: 64  # N - RIS reflecting elements
+  rician_k_factor: 10.0  # Rician K-factor (dB)
+  carrier_freq_ghz: 3.5  # sub-6 GHz (realistic for FL deployments)
+  bandwidth_mhz: 10.0
+  noise_power_dbm: -174  # noise spectral density
+  path_loss_exponent_direct: 3.5
+  path_loss_exponent_br: 2.2  # BS-RIS (LoS)
+  path_loss_exponent_ru: 2.5  # RIS-User
+  d_bs_ris: 20.0  # metres (RIS placed near BS)
+  d_ris_user_min: 5.0
+  d_ris_user_max: 50.0
+  d_bs_user_min: 30.0
+  d_bs_user_max: 150.0
+  # Blocked direct links (NLoS / obstacle): RIS is the useful path
+  direct_blockage_prob: 0.80
+  direct_blockage_attenuation_db: 35.0
+  snr_range_db: [-10, 0, 5, 10, 15, 20, 25, 30]
+
+# RIS Optimisation
+ris:
+  optimizer: 'ao'  # ao (alternating opt), sca, random
+  max_iterations: 50
+  convergence_threshold: 1e-6
+  phase_quantization_bits: null  # null = continuous, 1/2/3 = discrete
+
+# Federated Learning
+fl:
+  num_clients: 20
+  num_rounds: 200
+  local_epochs: 5
+  batch_size: 32
+  learning_rate: 0.01
+  lr_decay: 0.995
+  momentum: 0.9
+  weight_decay: 1e-4
+  fraction_fit: 0.5  # fraction of clients per round (before selection)
+  target_accuracy: 0.90
+  aggregation: 'fedavg'  # fedavg, aircomp
+  # Wireless FL: these must change training, not just logs
+  snr_outage_threshold_db: 8.0
+  use_rate_outage: false          # true in Experiment 2 (latency budget)
+  update_noise_scale: 0.08        # upload AWGN ~ scale / sqrt(SNR)
+  enforce_energy_latency: false   # true in Experiment 2
+
+# Data
+data:
+  dataset: 'cifar10'  # mnist, cifar10
+  partition: 'noniid'  # iid, noniid
+  dirichlet_alpha: [0.1, 0.5, 1.0, 100.0]  # alpha sweep for non-IID
+  exp1_dirichlet_alpha: 0.5
+  max_samples_per_client: null  # Set only for fast CPU smoke tests
+  num_classes: 10
+
+# Device Selection
+selection:
+  strategy: 'joint'  # joint, random, channel_only
+  latency_budget_ms: 100.0  # T_max per round
+  energy_budget_mj: 50.0  # E_max per device per round
+  tx_power_dbm: 23.0  # client transmit power
+  computation_capacity_ghz: 1.0  # client CPU frequency
+  cycles_per_sample: 20.0  # FLOPs per data sample
+  computation_energy_per_sample_mj: 0.001
+  max_participants: null  # null = fraction_fit * num_clients; matched for every selector
+
+# AirComp
+aircomp:
+  enabled: false
+  power_control: 'channel_inversion'
+  max_tx_power_dbm: 23.0
+  alignment_method: 'ris_assisted'  # ris_assisted, truncated_inversion
+  normalise_updates: true
+
+# Experiments
+experiments:
+  exp1_rounds: 200
+  exp2_latency_sweep: [50, 75, 100, 150, 200]
+  exp2_energy_sweep: [20, 30, 50, 75, 100]
+  exp3_ris_elements_sweep: [16, 32, 64, 128]
+  exp3_snr_sweep: [-5, 0, 5, 10, 15, 20]
+  exp3_fl_rounds: 50
+  exp2_skip_sweeps: false
+  exp2_sweep_rounds: 30
+  exp3_mse_trials: 50
+
+# Plotting
+plot:
+  dpi: 300
+  font_size: 14
+  fig_width: 8
+  fig_height: 6
+  style: 'seaborn-v0_8-whitegrid'
+  format: 'pdf'  # pdf, png, eps
