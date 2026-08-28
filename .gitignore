@@ -1,1 +1,23 @@
-data/cifar-10-python.tar.gz
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# Datasets (auto-downloaded by TorchVision)
+data/
+
+# Generated Results
+results/
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

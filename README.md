@@ -148,21 +148,43 @@ All experimental results are logged securely in the `results/` directory (create
 ## 7. Project Structure
 
 ```text
-ris-assisted-wireless-fl/
+RIS-Assisted-Wireless-Federated-Learning/
 ├── config/
-│   └── config.yaml          # Centralized configuration file
-├── data/                    # Automatically populated datasets (e.g., CIFAR-10)
-├── src/
-│   ├── channel/             # Wireless channel generation (Rician, Rayleigh)
-│   ├── ris/                 # RIS phase shift optimization (AO, SCA)
-│   ├── fl/                  # Federated learning mechanisms (Flower integration)
-│   ├── selection/           # Joint device selection algorithms
-│   └── utils/               # Helper routines (math, logging)
+│   ├── config.yaml          # Centralized configuration file
+│   └── config_fast.yaml     # Fast smoke-test configuration
+├── data/                    # Auto-downloaded datasets (MNIST, CIFAR-10)
+├── channel/
+│   ├── channel_model.py     # Wireless channel generation (Rician, Rayleigh)
+│   └── ris_optimizer.py     # RIS phase shift optimization (AO)
+├── fl/
+│   ├── aircomp.py           # Over-the-air computation (AirComp)
+│   ├── client.py            # FL client local training
+│   ├── data_partition.py    # IID / Dirichlet non-IID partitioning
+│   ├── models.py            # CNN architectures (MNIST, CIFAR-10)
+│   └── server.py            # FL server with wireless aggregation
+├── optimisation/
+│   ├── joint_design.py      # Joint device selection + RIS optimization
+│   └── baselines.py         # Baseline selection strategies
+├── experiments/
+│   ├── exp1_baseline.py     # Experiment 1: FL convergence ± RIS
+│   ├── exp2_joint_design.py # Experiment 2: Joint client + RIS design
+│   └── exp3_aircomp.py      # Experiment 3: AirComp evaluation
+├── analysis/
+│   └── compare_methods.py   # Cross-experiment comparison & plotting
 ├── metrics/
 │   └── metrics_logger.py    # Standardized metric tracking and I/O
-├── results/                 # Experiment outputs (logs, figures)
-├── experiments/             # Entry points for various simulation scenarios
+├── utils/
+│   └── plotting.py          # Publication-quality plotting utilities
+├── matlab/
+│   └── channel_gen.m        # MATLAB channel generation script
+├── docs/
+│   ├── REVIEW_EVIDENCE_PLAN.md
+│   └── RUNBOOK.md
+├── results/                 # Generated experiment outputs (git-ignored)
+├── main.py                  # Main entry point
+├── run_full_evaluation.py   # Multi-seed evaluation runner
 ├── requirements.txt         # Dependency manifest
+├── LICENSE                  # MIT License
 └── README.md                # Repository documentation
 ```
 
