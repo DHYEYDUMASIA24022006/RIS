@@ -15,6 +15,13 @@ data/
 
 # Generated Results
 results/
+results_fast/
+
+# Manuscript and Audit Artifacts
+*.docx
+*.doc
+*.pdf
+scratch/
 
 # OS & IDE
 .DS_Store
