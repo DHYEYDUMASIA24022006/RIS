@@ -53,9 +53,17 @@ class RISOptimizer:
         """
         return self._element_wise_ao(h_br, h_ru_list, h_d_list, mode=mode)
 
-    def optimize_sum_snr(self, h_br, h_ru_list, h_d_list) -> np.ndarray:
-        """Maximise sum-SNR across users."""
-        return self._element_wise_ao(h_br, h_ru_list, h_d_list, mode='sum_snr')
+    def optimize_sum_snr(self, h_br, h_ru_list, h_d_list,
+                         user_weights=None) -> np.ndarray:
+        """Maximise weighted sum-SNR across users.
+
+        ``user_weights`` lets the M2 scheduler align the shared RIS toward
+        clients with greater learning utility or participation debt. Omitting
+        it preserves the unweighted M1 behavior.
+        """
+        return self._element_wise_ao(
+            h_br, h_ru_list, h_d_list, mode='sum_snr',
+            user_weights=user_weights)
 
     def optimize_min_snr(self, h_br, h_ru_list, h_d_list) -> np.ndarray:
         """Max-min fairness: maximise minimum user SNR."""
@@ -77,7 +85,8 @@ class RISOptimizer:
     def _element_wise_ao(self, h_br: np.ndarray,
                          h_ru_list: list[np.ndarray],
                          h_d_list: list[np.ndarray],
-                         mode: str = 'sum_snr') -> np.ndarray:
+                         mode: str = 'sum_snr',
+                         user_weights=None) -> np.ndarray:
         """Element-wise alternating optimisation.
 
         For each element n, fix all other phases and find the optimal theta_n
@@ -89,6 +98,12 @@ class RISOptimizer:
         """
         N = self.N
         K = len(h_ru_list)
+        if user_weights is None:
+            user_weights = np.ones(K, dtype=float)
+        else:
+            user_weights = np.asarray(user_weights, dtype=float)
+            if user_weights.shape != (K,) or np.any(user_weights < 0):
+                raise ValueError('user_weights must be K non-negative values')
 
         # Initialise with random phases
         phi = self.random_phases(N)
@@ -102,6 +117,9 @@ class RISOptimizer:
 
         h_d_flat = [h_d_list[k].flatten() for k in range(K)]  # each (M,)
 
+        # Track effective channels incrementally: h_eff_k = A_k @ phi + h_d_k
+        h_eff = [A[k] @ phi + h_d_flat[k] for k in range(K)]
+
         for iteration in range(self.max_iters):
             phi_old = phi.copy()
 
@@ -112,12 +130,15 @@ class RISOptimizer:
                     val = 0.0 + 0.0j
                     for k in range(K):
                         a_kn = A[k][:, n]  # (M,)
-                        # h_eff_k = A_k @ phi + h_d_k
-                        h_eff_k = A[k] @ phi + h_d_flat[k]
-                        b_kn = h_eff_k - a_kn * phi[n]  # remove element n
-                        val += np.vdot(a_kn, b_kn)  # conj(a_kn)^T @ b_kn
+                        b_kn = h_eff[k] - a_kn * phi[n]  # remove element n
+                        val += user_weights[k] * np.vdot(a_kn, b_kn)
                     if np.abs(val) > 1e-15:
-                        phi[n] = val / np.abs(val)
+                        new_phi_n = val / np.abs(val)
+                        delta_phi = new_phi_n - phi[n]
+                        if delta_phi != 0:
+                            for k in range(K):
+                                h_eff[k] += A[k][:, n] * delta_phi
+                            phi[n] = new_phi_n
 
                 elif mode == 'min_snr':
                     # Find the user with minimum ||h_eff_k|| and optimise for them
@@ -127,9 +148,8 @@ class RISOptimizer:
                     b_kn_all = []
                     for k in range(K):
                         a_kn = A[k][:, n]
-                        h_eff_k = A[k] @ phi + h_d_flat[k]
-                        b_kn = h_eff_k - a_kn * phi[n]
-                        gain = np.linalg.norm(h_eff_k) ** 2
+                        b_kn = h_eff[k] - a_kn * phi[n]
+                        gain = float(np.vdot(h_eff[k], h_eff[k]).real)
                         if gain < min_gain:
                             min_gain = gain
                             min_k = k
@@ -139,7 +159,12 @@ class RISOptimizer:
                     # Optimise for the worst-case user
                     val = np.vdot(a_kn_all[min_k], b_kn_all[min_k])
                     if np.abs(val) > 1e-15:
-                        phi[n] = val / np.abs(val)
+                        new_phi_n = val / np.abs(val)
+                        delta_phi = new_phi_n - phi[n]
+                        if delta_phi != 0:
+                            for k in range(K):
+                                h_eff[k] += A[k][:, n] * delta_phi
+                            phi[n] = new_phi_n
 
                 elif mode == 'aircomp':
                     # Objective: minimise channel-gain spread (alignment)
@@ -150,9 +175,8 @@ class RISOptimizer:
                     b_kn_all = []
                     for k in range(K):
                         a_kn = A[k][:, n]
-                        h_eff_k = A[k] @ phi + h_d_flat[k]
-                        b_kn = h_eff_k - a_kn * phi[n]
-                        gains.append(np.linalg.norm(h_eff_k) ** 2 + 1e-15)
+                        b_kn = h_eff[k] - a_kn * phi[n]
+                        gains.append(float(np.vdot(h_eff[k], h_eff[k]).real) + 1e-15)
                         a_kn_all.append(a_kn)
                         b_kn_all.append(b_kn)
 
@@ -162,7 +186,12 @@ class RISOptimizer:
                         w_k = 1.0 / gains[k]
                         val += w_k * np.vdot(a_kn_all[k], b_kn_all[k])
                     if np.abs(val) > 1e-15:
-                        phi[n] = val / np.abs(val)
+                        new_phi_n = val / np.abs(val)
+                        delta_phi = new_phi_n - phi[n]
+                        if delta_phi != 0:
+                            for k in range(K):
+                                h_eff[k] += A[k][:, n] * delta_phi
+                            phi[n] = new_phi_n
 
             # Convergence check
             diff = float(np.linalg.norm(phi - phi_old).real)

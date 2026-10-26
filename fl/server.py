@@ -21,7 +21,7 @@ class FLServer:
 
     def __init__(self, model_fn, test_loader, config: dict,
                  channel=None, ris_optimizer=None, device_selector=None,
-                 aircomp_aggregator=None):
+                 aircomp_aggregator=None, validation_loader=None):
         """
         Args:
             model_fn: Callable returning a fresh nn.Module.
@@ -32,11 +32,17 @@ class FLServer:
             device_selector: JointDeviceRISOptimizer or baseline selector.
             aircomp_aggregator: AirCompAggregator instance (None = use FedAvg).
         """
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        requested_device = config.get('system', {}).get('device', 'auto')
+        if requested_device == 'auto':
+            requested_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = torch.device(requested_device)
         self.model_fn = model_fn
         self.global_model = model_fn().to(self.device)
         self.test_loader = test_loader
+        self.validation_loader = validation_loader
         self.config = config
+        seed = int(config.get('system', {}).get('seed', 42))
+        self._channel_rng = np.random.RandomState(seed)
 
         # Wireless components
         self.channel = channel
@@ -66,6 +72,7 @@ class FLServer:
         self.use_rate_outage = bool(fl_cfg.get('use_rate_outage', True))
         self.update_noise_scale = float(fl_cfg.get('update_noise_scale', 0.05))
         self.enforce_energy_latency = bool(fl_cfg.get('enforce_energy_latency', False))
+        self.max_participants = sel_cfg.get('max_participants')
 
         # Analog aggregation configuration.  AirComp is deliberately a server
         # concern because it aggregates *model updates*, not just synthetic
@@ -101,7 +108,13 @@ class FLServer:
             'mean_uplink_rate_bps': [],
             'selection_fairness': [], 'successful_upload_fairness': [],
             'client_selection_counts': [], 'client_success_counts': [],
-            'rounds_to_target': [],
+            'rounds_to_target': [], 'idle_round': [],
+            'resource_constraint_violations': [],
+            'latency_feasible_count': [], 'energy_feasible_count': [],
+            'jointly_feasible_count': [], 'attempted_upload_count': [],
+            'snr_rejection_count': [], 'empty_selection': [],
+            'aggregation_performed': [], 'global_model_delta': [],
+            'latency_is_valid': [], 'energy_is_valid': [],
         }
         selection_counts = np.zeros(num_clients, dtype=int)
         success_counts = np.zeros(num_clients, dtype=int)
@@ -124,7 +137,7 @@ class FLServer:
             h_br = h_ru = h_d = None
 
             if self.channel is not None:
-                ch_state = self.channel.generate_all_channels(num_clients)
+                ch_state = self._generate_channel_state(num_clients)
                 h_br = ch_state['h_br']
                 h_ru = ch_state['h_ru']
                 h_d = ch_state['h_d']
@@ -171,19 +184,41 @@ class FLServer:
                 selected_idx = None
 
             # ----- 3. Select who is scheduled to transmit ----- #
-            m = max(1, int(self.fraction_fit * num_clients))
+            default_m = max(1, int(self.fraction_fit * num_clients))
+            m = min(num_clients, int(self.max_participants or default_m))
+            resource_values = [self._client_resource_values(
+                len(clients[k].dataloader.dataset), rate_list[k], model_bits)
+                for k in range(num_clients)]
+            latency_feasible_count = sum(1 for (t_ms, _) in resource_values if t_ms <= self.latency_budget_ms)
+            energy_feasible_count = sum(1 for (_, e_mj) in resource_values if e_mj <= self.energy_budget_mj)
+            feasible_indices = [k for k, (latency_ms, energy_mj) in enumerate(resource_values)
+                                if (not self.enforce_energy_latency
+                                    or (latency_ms <= self.latency_budget_ms
+                                        and energy_mj <= self.energy_budget_mj))]
+            jointly_feasible_count = len(feasible_indices)
             if selected_idx is None:
-                if self.device_selector is not None and hasattr(self.device_selector, 'select'):
-                    selected_idx = self.device_selector.select(snr_list, m)
-                elif self.selection_strategy in ('channel_only', 'snr_top'):
-                    selected_idx = np.argsort(np.array(snr_list))[-m:].tolist()
+                if self.selection_strategy == 'random':
+                    count = min(m, len(feasible_indices))
+                    selected_idx = (list(np.random.choice(feasible_indices, count, replace=False))
+                                    if count else [])
+                elif self.selection_strategy in ('channel_only', 'snr_top',
+                                                  'channel_random_ris'):
+                    selected_idx = sorted(feasible_indices,
+                                          key=lambda k: snr_list[k], reverse=True)[:m]
+                elif self.device_selector is not None and hasattr(self.device_selector, 'select'):
+                    selected_idx = [int(k) for k in self.device_selector.select(snr_list, m)
+                                    if int(k) in feasible_indices][:m]
                 elif self.fraction_fit >= 0.999:
-                    selected_idx = list(range(num_clients))
+                    selected_idx = [k for k in range(num_clients)
+                                    if k in feasible_indices]
+                    selected_idx = selected_idx[:m]
                 else:
-                    selected_idx = list(np.random.choice(num_clients, m, replace=False))
-
-            if not selected_idx:
-                selected_idx = [int(np.argmax(np.array(snr_list)))]
+                    count = min(m, len(feasible_indices))
+                    selected_idx = (list(np.random.choice(feasible_indices, count, replace=False))
+                                    if count else [])
+            else:
+                selected_idx = [int(k) for k in selected_idx
+                                if int(k) in feasible_indices]
 
             for idx in selected_idx:
                 selection_counts[idx] += 1
@@ -192,17 +227,16 @@ class FLServer:
             successful_global_idx = []
             latencies_ms = []
             energies_mj = []
+            attempted_upload_count = len(selected_idx)
+            snr_rejection_count = 0
             for idx in selected_idx:
-                n_samples = len(clients[idx].dataloader.dataset)
-                t_comp_s = (n_samples * self.local_epochs * self.cycles_per_sample) / (self.cpu_ghz * 1e9)
-                t_comm_s = model_bits / max(rate_list[idx], 1e-12)
-                t_ms = (t_comp_s + t_comm_s) * 1000.0
-                e_mj = ((tx_power_w * t_comm_s) * 1000.0
-                        + n_samples * self.local_epochs * self.computation_energy_per_sample_mj)
+                t_ms, e_mj = resource_values[idx]
                 latencies_ms.append(t_ms)
                 energies_mj.append(e_mj)
 
                 snr_ok = snr_list[idx] >= snr_threshold_lin
+                if not snr_ok:
+                    snr_rejection_count += 1
                 rate_ok = (not self.use_rate_outage) or (t_ms <= self.latency_budget_ms)
                 energy_ok = (not self.enforce_energy_latency) or (e_mj <= self.energy_budget_mj)
                 if self.channel is None:
@@ -217,9 +251,20 @@ class FLServer:
             global_params = copy.deepcopy(self.global_model.state_dict())
             client_updates = []
             mse_list = []
+            utility_gains = {}
+            track_utility = (self.validation_loader is not None
+                             and self.device_selector is not None
+                             and hasattr(self.device_selector, 'observe_round'))
+            baseline_validation_loss = (
+                self._validation_loss_for_state(global_params)
+                if track_utility else None)
 
             for idx in successful_global_idx:
-                local_params, n_samples, _ = clients[idx].train(copy.deepcopy(global_params))
+                local_params, n_samples, _ = clients[idx].train(
+                    copy.deepcopy(global_params), round_idx=round_idx)
+                if baseline_validation_loss is not None:
+                    candidate_loss = self._validation_loss_for_state(local_params)
+                    utility_gains[idx] = baseline_validation_loss - candidate_loss
                 if (self.aircomp is None and self.channel is not None
                         and self.update_noise_scale > 0):
                     noisy, mse = self._impair_upload(local_params, snr_list[idx])
@@ -230,6 +275,7 @@ class FLServer:
                     client_updates.append((local_params, n_samples))
 
             # ----- 7. Aggregate ----- #
+            aggregation_performed = int(len(client_updates) > 0)
             if len(client_updates) > 0:
                 if self.aircomp is not None and self.channel is not None:
                     gains = [aircomp_gains[idx] for idx in successful_global_idx]
@@ -239,6 +285,15 @@ class FLServer:
                 else:
                     aggregated = self.fedavg_aggregate(client_updates)
                 self.global_model.load_state_dict(aggregated)
+                param_delta = sum(torch.sum((self.global_model.state_dict()[k].float() - global_params[k].float())**2).item()
+                                  for k in global_params if global_params[k].is_floating_point())
+                global_model_delta = float(np.sqrt(param_delta))
+            else:
+                global_model_delta = 0.0
+
+            if self.device_selector is not None and hasattr(self.device_selector, 'observe_round'):
+                self.device_selector.observe_round(
+                    selected_idx, successful_global_idx, utility_gains)
 
             # ----- 8. Evaluate ----- #
             loss, accuracy = self.evaluate()
@@ -257,13 +312,20 @@ class FLServer:
             mean_snr_db = float(np.mean(snr_db_sel)) if snr_db_sel else 0.0
             min_snr_db = float(np.min(snr_db_sel)) if snr_db_sel else 0.0
             max_snr_db = float(np.max(snr_db_sel)) if snr_db_sel else 0.0
-            outage = 1.0 - (len(successful_global_idx) / max(len(selected_idx), 1))
+            outage = (1.0 - len(successful_global_idx) / len(selected_idx)
+                      if selected_idx else 0.0)
             agg_mse = float(np.mean(mse_list)) if mse_list else 0.0
             mean_rate = float(np.mean(rates_sel)) if rates_sel else 0.0
-            max_latency_ms = float(np.max(latencies_ms)) if latencies_ms else 0.0
-            mean_energy = float(np.mean(energies_mj)) if energies_mj else 0.0
+            latency_is_valid = int(len(latencies_ms) > 0)
+            energy_is_valid = int(len(energies_mj) > 0)
+            max_latency_ms = float(np.max(latencies_ms)) if latencies_ms else float('nan')
+            mean_energy = float(np.mean(energies_mj)) if energies_mj else float('nan')
             selection_fairness = self.jain_fairness(selection_counts)
             success_fairness = self.jain_fairness(success_counts)
+            violations = sum(
+                int(latencies_ms[i] > self.latency_budget_ms
+                    or energies_mj[i] > self.energy_budget_mj)
+                for i in range(len(selected_idx))) if selected_idx else 0
 
             results['accuracy'].append(accuracy)
             results['loss'].append(loss)
@@ -282,8 +344,20 @@ class FLServer:
             results['successful_upload_fairness'].append(success_fairness)
             results['client_selection_counts'].append(selection_counts.tolist())
             results['client_success_counts'].append(success_counts.tolist())
+            results['idle_round'].append(int(not selected_idx))
+            results['resource_constraint_violations'].append(violations)
             results['rounds_to_target'].append(
                 first_target_round if first_target_round is not None else -1)
+            results['latency_feasible_count'].append(latency_feasible_count)
+            results['energy_feasible_count'].append(energy_feasible_count)
+            results['jointly_feasible_count'].append(jointly_feasible_count)
+            results['attempted_upload_count'].append(attempted_upload_count)
+            results['snr_rejection_count'].append(snr_rejection_count)
+            results['empty_selection'].append(int(not selected_idx))
+            results['aggregation_performed'].append(aggregation_performed)
+            results['global_model_delta'].append(global_model_delta)
+            results['latency_is_valid'].append(latency_is_valid)
+            results['energy_is_valid'].append(energy_is_valid)
 
             if verbose:
                 iterator.set_postfix({
@@ -306,14 +380,70 @@ class FLServer:
                     max_snr_db=max_snr_db,
                     outage_probability=outage,
                     mean_uplink_rate_bps=mean_rate,
-                    per_round_latency_ms=max_latency_ms,
-                    mean_client_energy_mj=mean_energy,
+                    per_round_latency_ms=max_latency_ms if latency_is_valid else None,
+                    mean_client_energy_mj=mean_energy if energy_is_valid else None,
                     jain_fairness_index=success_fairness,
                     selection_strategy=self.selection_strategy,
                     rounds_to_target=first_target_round if first_target_round is not None else -1,
+                    idle_round=int(not selected_idx),
+                    resource_constraint_violations=violations,
+                    latency_feasible_count=latency_feasible_count,
+                    energy_feasible_count=energy_feasible_count,
+                    jointly_feasible_count=jointly_feasible_count,
+                    attempted_upload_count=attempted_upload_count,
+                    snr_rejection_count=snr_rejection_count,
+                    empty_selection=int(not selected_idx),
+                    aggregation_performed=aggregation_performed,
+                    global_model_delta=global_model_delta,
+                    latency_is_valid=latency_is_valid,
+                    energy_is_valid=energy_is_valid,
                 )
 
         return results
+
+    def _client_resource_values(self, n_samples: int, rate_bps: float,
+                                model_bits: int) -> tuple[float, float]:
+        """Return estimated client completion time (ms) and energy (mJ)."""
+        compute_s = (n_samples * self.local_epochs * self.cycles_per_sample
+                     / max(self.cpu_ghz * 1e9, 1e-12))
+        comm_s = model_bits / max(float(rate_bps), 1e-12)
+        tx_power_w = 10.0 ** ((float(self.tx_power_dbm) - 30.0) / 10.0)
+        latency_ms = (compute_s + comm_s) * 1000.0
+        energy_mj = (tx_power_w * comm_s * 1000.0
+                     + n_samples * self.local_epochs
+                     * self.computation_energy_per_sample_mj)
+        return float(latency_ms), float(energy_mj)
+
+    def _generate_channel_state(self, num_clients: int) -> dict:
+        """Use an isolated channel RNG so methods see paired channel traces."""
+        global_state = np.random.get_state()
+        np.random.set_state(self._channel_rng.get_state())
+        try:
+            state = self.channel.generate_all_channels(num_clients)
+            self._channel_rng.set_state(np.random.get_state())
+        finally:
+            np.random.set_state(global_state)
+        return state
+
+    def _validation_loss_for_state(self, state_dict) -> float:
+        """Evaluate one candidate client model on the held-out validation set."""
+        if not hasattr(self, '_val_model') or self._val_model is None:
+            self._val_model = self.model_fn().to(self.device)
+        self._val_model.load_state_dict(state_dict)
+        self._val_model.eval()
+        criterion = nn.CrossEntropyLoss(reduction='sum')
+        total_loss = 0.0
+        total = 0
+        if not hasattr(self, '_cached_val_batches') or self._cached_val_batches is None:
+            self._cached_val_batches = [
+                (data.to(self.device), target.to(self.device))
+                for data, target in self.validation_loader
+            ] if self.validation_loader is not None else []
+        with torch.no_grad():
+            for data, target in self._cached_val_batches:
+                total_loss += float(criterion(self._val_model(data), target).item())
+                total += int(data.size(0))
+        return total_loss / max(total, 1)
 
     @staticmethod
     def jain_fairness(values: np.ndarray) -> float:
@@ -400,12 +530,14 @@ class FLServer:
         weight = client_updates[0][1] / total_samples
 
         for key in aggregated:
-            aggregated[key] = aggregated[key].float() * weight
+            if aggregated[key].is_floating_point():
+                aggregated[key] = aggregated[key].float() * weight
 
         for params, n_samples in client_updates[1:]:
             w = n_samples / total_samples
             for key in aggregated:
-                aggregated[key] += params[key].float() * w
+                if aggregated[key].is_floating_point():
+                    aggregated[key] += params[key].float() * w
 
         return aggregated
 

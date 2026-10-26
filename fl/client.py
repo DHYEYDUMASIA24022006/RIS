@@ -9,38 +9,52 @@ class FLClient:
     def __init__(self, client_id, dataloader, model_fn, config):
         self.client_id = client_id
         self.dataloader = dataloader
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        requested_device = config.get('device', 'auto')
+        if requested_device == 'auto':
+            requested_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = torch.device(requested_device)
         self.model = model_fn().to(self.device)
         self.config = config
-        self.lr = config.get("lr", 0.01)
-        self.momentum = config.get("momentum", 0.5)
-        self.epochs = config.get("local_epochs", 1)
+        self.lr = float(config.get("lr", 0.01))
+        self.momentum = float(config.get("momentum", 0.5))
+        self.lr_decay = float(config.get('lr_decay', 1.0))
+        self.weight_decay = float(config.get('weight_decay', 0.0))
+        self.epochs = int(config.get("local_epochs", 1))
         
-    def train(self, global_params: dict) -> tuple[dict, int, dict]:
+    def train(self, global_params: dict, round_idx: int = 0) -> tuple[dict, int, dict]:
         """Local training.
         1. Load global parameters
         2. Train for E local epochs on local data
         3. Compute gradient update (delta = local - global)
-        4. Return (parameters_dict, num_samples, metrics_dict)
         """
+        num_samples = len(self.dataloader.dataset)
+        if num_samples == 0:
+            return global_params, 0, {"loss": float('nan'), "empty_dataset": True}
+
         self.model.load_state_dict(global_params)
         self.model.train()
         
-        optimizer = optim.SGD(self.model.parameters(), lr=self.lr, momentum=self.momentum)
+        round_lr = self.lr * (self.lr_decay ** max(0, int(round_idx)))
+        optimizer = optim.SGD(
+            self.model.parameters(), lr=round_lr, momentum=self.momentum,
+            weight_decay=self.weight_decay)
         criterion = nn.CrossEntropyLoss()
         
         epoch_loss = []
         for epoch in range(self.epochs):
-            batch_loss = []
+            running_loss = 0.0
+            num_batches = 0
             for batch_idx, (data, target) in enumerate(self.dataloader):
-                data, target = data.to(self.device), target.to(self.device)
-                optimizer.zero_grad()
+                data = data.to(self.device, non_blocking=True)
+                target = target.to(self.device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
                 output = self.model(data)
                 loss = criterion(output, target)
                 loss.backward()
                 optimizer.step()
-                batch_loss.append(loss.item())
-            epoch_loss.append(sum(batch_loss) / len(batch_loss) if batch_loss else 0.0)
+                running_loss += loss.detach()
+                num_batches += 1
+            epoch_loss.append(float((running_loss / max(num_batches, 1)).item()))
 
         num_samples = len(self.dataloader.dataset)
         metrics = {"loss": (sum(epoch_loss) / len(epoch_loss)) if epoch_loss else 0.0}

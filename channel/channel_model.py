@@ -42,9 +42,11 @@ class WirelessChannel:
         # Bandwidth
         self.bandwidth_hz = ch.get('bandwidth_mhz', 10.0) * 1e6
 
-        # Noise power
-        noise_psd_dbm = ch.get('noise_power_dbm', -174)
-        # Total noise = N0 * B
+        # Noise spectral density N0 (dBm/Hz) and total noise power (Watts) = N0 * B
+        # noise_power_dbm in config represents the thermal noise spectral density N0 = -174 dBm/Hz
+        noise_psd_dbm = float(ch.get('noise_spectral_density_dbm_per_hz',
+                                     ch.get('noise_power_dbm', -174.0)))
+        # Total noise power in Watts = N0 * B = 10^((N0_dBm - 30)/10) * B_Hz
         self.noise_power_w = 10 ** ((noise_psd_dbm - 30) / 10.0) * self.bandwidth_hz
 
         # Path loss exponents

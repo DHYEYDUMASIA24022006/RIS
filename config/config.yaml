@@ -38,11 +38,11 @@ fl:
   num_clients: 20
   num_rounds: 200
   local_epochs: 5
-  batch_size: 32
+  batch_size: 64
   learning_rate: 0.01
   lr_decay: 0.995
   momentum: 0.9
-  weight_decay: 1e-4
+  weight_decay: 0.0001
   fraction_fit: 0.5  # fraction of clients per round (before selection)
   target_accuracy: 0.90
   aggregation: 'fedavg'  # fedavg, aircomp
@@ -58,6 +58,8 @@ data:
   partition: 'noniid'  # iid, noniid
   dirichlet_alpha: [0.1, 0.5, 1.0, 100.0]  # alpha sweep for non-IID
   exp1_dirichlet_alpha: 0.5
+  exp2_dirichlet_alpha: 0.5  # M2 partition; set partition: iid for IID control
+  validation_fraction: 0.05  # held out from clients; test set remains untouched
   max_samples_per_client: null  # Set only for fast CPU smoke tests
   num_classes: 10
 
@@ -71,6 +73,13 @@ selection:
   cycles_per_sample: 20.0  # FLOPs per data sample
   computation_energy_per_sample_mj: 0.001
   max_participants: null  # null = fraction_fit * num_clients; matched for every selector
+  learning_utility_weight: 0.65  # smoothed validation-loss improvement rank
+  participation_debt_weight: 0.20  # fewer successful uploads gives higher priority
+  starvation_age_weight: 0.15  # rounds since last successful upload
+  starvation_age_cap_rounds: 100
+  utility_ema_momentum: 0.8
+  utility_validation_samples: 512  # fixed M2 utility subset; never the test set
+  max_alternating_iters: 5
 
 # AirComp
 aircomp:

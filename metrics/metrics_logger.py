@@ -15,8 +15,14 @@ class MetricsLogger:
         'outage_probability', 'mean_uplink_rate_bps',
         'per_round_latency_ms', 'mean_client_energy_mj',
         'jain_fairness_index', 'rounds_to_target',
+        'idle_round', 'resource_constraint_violations',
         'ris_phase_norm', 'selection_strategy',
-        'dirichlet_alpha', 'num_ris_elements'
+        'dirichlet_alpha', 'num_ris_elements',
+        'latency_feasible_count', 'energy_feasible_count',
+        'jointly_feasible_count', 'attempted_upload_count',
+        'snr_rejection_count', 'empty_selection',
+        'aggregation_performed', 'global_model_delta',
+        'latency_is_valid', 'energy_is_valid'
     ]
     
     def __init__(self, save_dir: str, experiment_name: str):
@@ -64,7 +70,16 @@ class MetricsLogger:
         final_acc = self.history[-1].get('test_accuracy', 0.0)
         
         def _mean(key):
-            vals = [r.get(key) for r in self.history if r.get(key) is not None]
+            vals = []
+            for r in self.history:
+                val = r.get(key)
+                if val is not None:
+                    try:
+                        fval = float(val)
+                        if not np.isnan(fval):
+                            vals.append(fval)
+                    except (ValueError, TypeError):
+                        pass
             return float(np.mean(vals)) if vals else None
 
         summary = {
@@ -81,6 +96,8 @@ class MetricsLogger:
             "mean_energy_mj": _mean('mean_client_energy_mj'),
             "final_successful_upload_fairness": self.history[-1].get('jain_fairness_index'),
             "rounds_to_target": self.history[-1].get('rounds_to_target'),
+            "idle_round_fraction": _mean('idle_round'),
+            "mean_resource_constraint_violations_per_round": _mean('resource_constraint_violations'),
         }
         
         with open(filepath, mode='w') as f:

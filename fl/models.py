@@ -24,28 +24,32 @@ class MNISTNet(nn.Module):
         return x
 
 class CIFAR10Net(nn.Module):
-    """CNN for CIFAR-10 (3 conv + 2 fc with BatchNorm and Dropout)."""
-    def __init__(self):
+    """Compact CNN for CIFAR-10 suited for Wireless Federated Learning.
+
+    Uses GroupNorm instead of BatchNorm to ensure stable federated aggregation
+    without running statistic mismatch across non-IID client distributions.
+    Dimensioned so model size (~57k params, ~1.83 Mbits) aligns with realistic
+    wireless channel capacity (10-50 Mbps) and latency budgets (50-200 ms).
+    """
+    def __init__(self, num_classes: int = 10):
         super(CIFAR10Net, self).__init__()
-        self.conv1 = nn.Conv2d(3, 64, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.conv2 = nn.Conv2d(64, 128, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(128)
-        self.conv3 = nn.Conv2d(128, 256, 3, padding=1)
-        self.bn3 = nn.BatchNorm2d(256)
-        self.fc1 = nn.Linear(256 * 4 * 4, 512)
-        self.dropout = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(512, 10)
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        self.gn1 = nn.GroupNorm(4, 32)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.gn2 = nn.GroupNorm(8, 64)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        self.gn3 = nn.GroupNorm(8, 64)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(64, num_classes)
 
     def forward(self, x):
-        x = F.max_pool2d(F.relu(self.bn1(self.conv1(x))), 2)
-        x = F.max_pool2d(F.relu(self.bn2(self.conv2(x))), 2)
-        x = F.max_pool2d(F.relu(self.bn3(self.conv3(x))), 2)
+        x = self.pool(F.relu(self.gn1(self.conv1(x))))
+        x = self.pool(F.relu(self.gn2(self.conv2(x))))
+        x = self.pool(F.relu(self.gn3(self.conv3(x))))
+        x = self.gap(x)
         x = torch.flatten(x, 1)
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
-        return x
+        return self.fc(x)
 
 def get_model(dataset_name: str, device: torch.device) -> nn.Module:
     """Factory function."""

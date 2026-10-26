@@ -4,7 +4,7 @@
 system:
   seed: 42
   device: 'cpu'
-  results_dir: 'results'
+  results_dir: 'results_fast'
 
 channel:
   model: 'rician'
@@ -40,7 +40,7 @@ fl:
   learning_rate: 0.01
   lr_decay: 0.995
   momentum: 0.9
-  weight_decay: 1e-4
+  weight_decay: 0.0001
   fraction_fit: 0.5
   target_accuracy: 0.95
   aggregation: 'fedavg'
@@ -54,6 +54,8 @@ data:
   partition: 'noniid'
   dirichlet_alpha: [0.1, 0.5, 1.0, 100.0]
   exp1_dirichlet_alpha: 0.5
+  exp2_dirichlet_alpha: 0.5
+  validation_fraction: 0.05
   max_samples_per_client: null
   num_classes: 10
 
@@ -66,6 +68,13 @@ selection:
   cycles_per_sample: 20.0
   computation_energy_per_sample_mj: 0.001
   max_participants: null
+  learning_utility_weight: 0.65
+  participation_debt_weight: 0.20
+  starvation_age_weight: 0.15
+  starvation_age_cap_rounds: 100
+  utility_ema_momentum: 0.8
+  utility_validation_samples: 256
+  max_alternating_iters: 5
 
 aircomp:
   enabled: false
@@ -81,6 +90,7 @@ experiments:
   exp3_ris_elements_sweep: [16, 32, 64, 128]
   exp3_snr_sweep: [-5, 0, 5, 10, 15, 20]
   exp3_fl_rounds: 20
+  exp2_skip_sweeps: true  # fixed-budget smoke comparison only
 
 plot:
   dpi: 300
